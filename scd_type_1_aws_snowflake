@@ -1,0 +1,70 @@
+-- 1. Create Employee table
+CREATE OR REPLACE TABLE EMPLOYEE
+(
+    EMPNO NUMBER,
+    ENAME VARCHAR,
+    JOB VARCHAR,
+    SAL NUMBER
+);
+
+-- 2. Insert employee records
+INSERT INTO EMPLOYEE
+VALUES
+(123, 'kumar', 'software', 10000),
+(124, 'venu', 'hardware', 10000);
+
+-- 3. Create S3 Storage Integration
+-- Include this only if this was part of your task
+...
+
+-- 4. Create Stage
+CREATE OR REPLACE STAGE EMPLOYEE_S3_STAGE
+STORAGE_INTEGRATION = S3_INTEGRATION
+URL = 's3://irfan-snowflake-s3-demo-2026/source_files/'
+FILE_FORMAT = (
+    TYPE = CSV
+    FIELD_DELIMITER = ','
+    SKIP_HEADER = 1
+);
+
+-- 5. Create staging table
+CREATE OR REPLACE TABLE STAGE1_EMPLOYEE
+LIKE EMPLOYEE;
+
+-- 6. Load data from S3
+COPY INTO STAGE1_EMPLOYEE
+FROM @EMPLOYEE_S3_STAGE
+FILE_FORMAT = (
+    TYPE = CSV
+    FIELD_DELIMITER = ','
+    SKIP_HEADER = 1
+);
+
+-- 7. Stored Procedure
+CREATE OR REPLACE PROCEDURE LOAD_EMPLOYEE()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+BEGIN
+
+    DELETE FROM EMPLOYEE
+    WHERE EMPNO IN (
+        SELECT DISTINCT EMPNO
+        FROM STAGE1_EMPLOYEE
+    );
+
+    INSERT INTO EMPLOYEE
+    SELECT *
+    FROM STAGE1_EMPLOYEE;
+
+    RETURN 'EMPLOYEE LOAD COMPLETED';
+
+END;
+$$;
+
+-- 8. Execute procedure
+CALL LOAD_EMPLOYEE();
+
+-- 9. Validate
+SELECT * FROM EMPLOYEE;
