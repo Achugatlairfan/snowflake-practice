@@ -1,0 +1,252 @@
+-- ============================================================
+-- LINEITEM & PART DATA PIPELINE
+-- Source      : Snowflake TPCH_SF1000
+-- Target      : AWS S3 + Snowflake Stage/Dimension Tables
+-- Final Table : FACT_LINEITEM_DERIVED
+-- Purpose     : Extract source data to S3, reload into Snowflake,
+--               load dimension tables, and create a derived
+--               fact table using LEFT JOIN.
+-- ============================================================
+
+
+-- ============================================================
+-- STEP 1: INSPECT SOURCE TABLES
+-- ============================================================
+
+-- Check the structure of the LINEITEM source table.
+DESC TABLE SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.LINEITEM;
+
+-- Check the structure of the PART source table.
+DESC TABLE SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.PART;
+
+-- Display existing Snowflake stages and verify the S3 stage.
+SHOW STAGES;
+
+
+-- ============================================================
+-- STEP 2: EXPORT LINEITEM DATA FROM SNOWFLAKE TO S3
+-- ============================================================
+
+-- Export 100,000 LINEITEM records to S3.
+-- The timestamp is included in the filename.
+-- LIMIT 100000 is used for learning/testing instead of
+-- exporting the complete large LINEITEM table.
+
+COPY INTO @EMPLOYEE_S3_STAGE/FACT_DATA/FACT_LINEITEM_20261006172000.txt
+FROM (
+    SELECT *
+    FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.LINEITEM
+    LIMIT 100000
+)
+FILE_FORMAT = (
+    TYPE = 'CSV'
+    FIELD_DELIMITER = '|'
+    COMPRESSION = NONE
+)
+SINGLE = TRUE
+OVERWRITE = TRUE;
+
+
+-- ============================================================
+-- STEP 3: EXPORT PART DATA FROM SNOWFLAKE TO S3
+-- ============================================================
+
+-- Export 100,000 PART records to the same S3 folder.
+-- PART data is stored separately from LINEITEM data.
+
+COPY INTO @EMPLOYEE_S3_STAGE/FACT_DATA/FACT_PART_20261006172500.txt
+FROM (
+    SELECT *
+    FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.PART
+    LIMIT 100000
+)
+FILE_FORMAT = (
+    TYPE = 'CSV'
+    FIELD_DELIMITER = '|'
+    COMPRESSION = NONE
+)
+SINGLE = TRUE
+OVERWRITE = TRUE;
+
+
+-- ============================================================
+-- STEP 4: CREATE LINEITEM STAGING TABLE
+-- ============================================================
+
+-- Create an empty staging table with the same structure
+-- as the source LINEITEM table.
+-- WHERE 1 = 0 creates the structure without loading data.
+
+CREATE OR REPLACE TABLE STAGE_LINEITEM AS
+SELECT *
+FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.LINEITEM
+WHERE 1 = 0;
+
+
+-- ============================================================
+-- STEP 5: LOAD LINEITEM DATA FROM S3 INTO SNOWFLAKE
+-- ============================================================
+
+-- Load the LINEITEM file from S3 into the staging table.
+-- Pipe (|) is used as the column delimiter.
+-- ABORT_STATEMENT stops the load if an error occurs.
+
+COPY INTO STAGE_LINEITEM
+FROM @EMPLOYEE_S3_STAGE/FACT_DATA/FACT_LINEITEM_20261006172000.txt
+FILE_FORMAT = (
+    TYPE = 'CSV'
+    FIELD_DELIMITER = '|'
+    COMPRESSION = NONE
+    SKIP_HEADER = 0
+)
+ON_ERROR = 'ABORT_STATEMENT';
+
+
+-- ============================================================
+-- STEP 6: CREATE PART STAGING TABLE
+-- ============================================================
+
+-- Create an empty staging table with the same structure
+-- as the source PART table.
+
+CREATE OR REPLACE TABLE STAGE_PART AS
+SELECT *
+FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.PART
+WHERE 1 = 0;
+
+
+-- ============================================================
+-- STEP 7: LOAD PART DATA FROM S3 INTO SNOWFLAKE
+-- ============================================================
+
+-- Load the PART file from S3 into the PART staging table.
+
+COPY INTO STAGE_PART
+FROM @EMPLOYEE_S3_STAGE/FACT_DATA/FACT_PART_20261006172500.txt
+FILE_FORMAT = (
+    TYPE = 'CSV'
+    FIELD_DELIMITER = '|'
+    COMPRESSION = NONE
+    SKIP_HEADER = 0
+)
+ON_ERROR = 'ABORT_STATEMENT';
+
+
+-- ============================================================
+-- STEP 8: VALIDATE STAGING TABLE RECORD COUNTS
+-- ============================================================
+
+-- Verify the number of LINEITEM records loaded into staging.
+
+SELECT COUNT(*) AS LINEITEM_COUNT
+FROM STAGE_LINEITEM;
+
+-- Verify the number of PART records loaded into staging.
+
+SELECT COUNT(*) AS PART_COUNT
+FROM STAGE_PART;
+
+
+-- ============================================================
+-- STEP 9: CREATE PART DIMENSION TABLE
+-- ============================================================
+
+-- Create an empty dimension table using the structure
+-- of the PART staging table.
+
+CREATE OR REPLACE TABLE DIM_PART AS
+SELECT *
+FROM STAGE_PART
+WHERE 1 = 0;
+
+
+-- ============================================================
+-- STEP 10: LOAD PART DATA INTO DIMENSION TABLE
+-- ============================================================
+
+-- Move the processed PART data from staging into DIM_PART.
+
+INSERT INTO DIM_PART
+SELECT *
+FROM STAGE_PART;
+
+
+-- ============================================================
+-- STEP 11: CLEAR PROCESSED PART STAGING DATA
+-- ============================================================
+
+-- Delete the processed records from the staging table
+-- after successfully loading them into DIM_PART.
+
+DELETE FROM STAGE_PART;
+
+
+-- ============================================================
+-- STEP 12: CREATE LINEITEM DIMENSION TABLE
+-- ============================================================
+
+-- Create an empty dimension table using the structure
+-- of the LINEITEM staging table.
+
+CREATE OR REPLACE TABLE DIM_LINEITEM AS
+SELECT *
+FROM STAGE_LINEITEM
+WHERE 1 = 0;
+
+
+-- ============================================================
+-- STEP 13: LOAD LINEITEM DATA INTO DIMENSION TABLE
+-- ============================================================
+
+-- Move the processed LINEITEM data from staging
+-- into DIM_LINEITEM.
+
+INSERT INTO DIM_LINEITEM
+SELECT *
+FROM STAGE_LINEITEM;
+
+
+-- ============================================================
+-- STEP 14: CLEAR PROCESSED LINEITEM STAGING DATA
+-- ============================================================
+
+-- Delete the processed records from the staging table
+-- after successfully loading them into DIM_LINEITEM.
+
+DELETE FROM STAGE_LINEITEM;
+
+
+-- ============================================================
+-- STEP 15: CREATE DERIVED FACT TABLE
+-- ============================================================
+
+-- Combine LINEITEM and PART data using a LEFT JOIN.
+-- L_PARTKEY from LINEITEM is matched with P_PARTKEY from PART.
+--
+-- LEFT JOIN ensures that every LINEITEM record is retained,
+-- even if a matching PART record does not exist.
+
+CREATE OR REPLACE TABLE FACT_LINEITEM_DERIVED AS
+SELECT
+    L.*,
+    P.P_NAME,
+    P.P_MFGR,
+    P.P_BRAND,
+    P.P_TYPE,
+    P.P_SIZE,
+    P.P_CONTAINER,
+    P.P_RETAILPRICE,
+    P.P_COMMENT
+FROM DIM_LINEITEM L
+LEFT JOIN DIM_PART P
+    ON L.L_PARTKEY = P.P_PARTKEY;
+
+
+-- ============================================================
+-- STEP 16: VALIDATE FINAL DERIVED TABLE
+-- ============================================================
+
+-- Verify the number of records in the final derived table.
+
+SELECT COUNT(*) AS DERIVED_COUNT
+FROM FACT_LINEITEM_DERIVED;
